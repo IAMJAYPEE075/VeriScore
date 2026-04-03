@@ -717,6 +717,8 @@ footer{
 const CHAIN_COLORS={solana:'#9945ff',ethereum:'#627eea',base:'#0052ff',arbitrum:'#12aaff',optimism:'#ff0420',polygon:'#8247e5'};
 const EVM_ADDRESS_RE=/^0x[a-fA-F0-9]{40}$/;
 const SOLANA_ADDRESS_RE=/^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+const DETECT_TIMEOUT_MS=20000;
+const SCORE_TIMEOUT_MS=60000;
 let chain='';
 let detectTimer=null;
 let detectSequence=0;
@@ -858,7 +860,7 @@ async function detectChainForWallet(wallet){
   if(!EVM_ADDRESS_RE.test(wallet)) return null;
 
   try{
-    const res=await fetch(`/detect/${encodeURIComponent(wallet)}`,{signal:AbortSignal.timeout(15000)});
+    const res=await fetch(`/detect/${encodeURIComponent(wallet)}`,{signal:AbortSignal.timeout(DETECT_TIMEOUT_MS)});
     if(!res.ok) throw new Error(await getErrorMessage(res));
     const payload=await res.json();
     return payload?.chain||'ethereum';
@@ -886,7 +888,7 @@ async function handleScore(){
     const ep=detectedChain==='solana'
       ?`/score/${encodeURIComponent(wallet)}`
       :`/score/${detectedChain}/${encodeURIComponent(wallet)}`;
-    const res=await fetch(ep,{signal:AbortSignal.timeout(20000)});
+    const res=await fetch(ep,{signal:AbortSignal.timeout(SCORE_TIMEOUT_MS)});
     if(!res.ok){
       throw new Error(await getErrorMessage(res));
     }

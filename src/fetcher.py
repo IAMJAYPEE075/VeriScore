@@ -1018,23 +1018,24 @@ class EVMWalletFetcher:
         )
         metrics["usdc_volume_30d"] = round(usdc_volume_30d, 2)
 
-        try:
-            decoded_metrics = await fetch_evm_decoded(
-                self.wallet_address,
-                self.chain,
-                alchemy_api_key=self.alchemy_api_key,
-                timeout=self.timeout,
-            )
-            metrics["unique_protocols"] = int(decoded_metrics.get("unique_protocols", 0))
-            metrics["repayment_count"] = int(decoded_metrics.get("repayment_count", 0))
-            metrics["liquidation_count"] = int(decoded_metrics.get("liquidation_count", 0))
-        except Exception as exc:
-            logger.warning(
-                "Falling back to heuristic EVM metrics for %s on %s: %s",
-                self.wallet_address,
-                self.chain,
-                exc,
-            )
+        if self.alchemy_api_key:
+            try:
+                decoded_metrics = await fetch_evm_decoded(
+                    self.wallet_address,
+                    self.chain,
+                    alchemy_api_key=self.alchemy_api_key,
+                    timeout=self.timeout,
+                )
+                metrics["unique_protocols"] = int(decoded_metrics.get("unique_protocols", 0))
+                metrics["repayment_count"] = int(decoded_metrics.get("repayment_count", 0))
+                metrics["liquidation_count"] = int(decoded_metrics.get("liquidation_count", 0))
+            except Exception as exc:
+                logger.warning(
+                    "Falling back to heuristic EVM metrics for %s on %s: %s",
+                    self.wallet_address,
+                    self.chain,
+                    exc,
+                )
 
         return metrics
 

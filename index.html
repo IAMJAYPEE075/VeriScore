@@ -459,7 +459,11 @@ footer{
 
 <script>
 const CHAIN_COLORS={solana:'#9945ff',ethereum:'#627eea',base:'#0052ff',arbitrum:'#12aaff',optimism:'#ff0420',polygon:'#8247e5'};
+const EVM_ADDRESS_RE=/^0x[a-fA-F0-9]{40}$/;
+const SOLANA_ADDRESS_RE=/^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 let chain='solana';
+let detectTimer=null;
+let detectSequence=0;
 
 function syncChain(c){
   chain=c;
@@ -475,6 +479,7 @@ document.querySelectorAll('.chain-tab,.mob-pill').forEach(el=>{
 document.getElementById('wallet-input').addEventListener('keydown',e=>{
   if(e.key==='Enter') handleScore();
 });
+document.getElementById('wallet-input').addEventListener('input',scheduleChainDetection);
 
 const scoreColor=s=>s>=75?'var(--good)':s>=45?'var(--mid-warn)':'var(--warn)';
 const verdict=s=>s>=85?'Excellent Standing':s>=70?'Good Reputation':s>=50?'Moderate Activity':s>=30?'Low Trust Signal':'High Risk';
@@ -506,9 +511,13 @@ function showError(msg){
 
 function showResult(data,wallet){
   const s=data.score, col=scoreColor(s);
+  const resultChain=data.chain||chain;
+  const shownWallet=data.wallet||wallet;
+  const chainColor=CHAIN_COLORS[resultChain]||'var(--ink2)';
   const circ=2*Math.PI*54; // r=54 → 339.3
   const offset=circ-(s/100)*circ;
   const hasA=data.attestation?.payment_hash||data.attestation?.proof_url;
+  syncChain(resultChain);
 
   document.getElementById('panel-body').innerHTML=`
     <div class="score-result">
@@ -525,13 +534,13 @@ function showResult(data,wallet){
           </div>
         </div>
         <div>
-          <div class="score-addr">${trunc(wallet,10,8)}</div>
+          <div class="score-addr">${trunc(shownWallet,10,8)}</div>
           <div class="score-verdict" style="color:${col}">${verdict(s)}</div>
           <div class="score-explain">${data.explanation||'Computed via behavioral analysis inside an OpenGradient TEE.'}</div>
         </div>
       </div>
       <div class="meta-grid">
-        <div class="meta-cell"><div class="mk">Chain</div><div class="mv" style="color:${CHAIN_COLORS[chain]}">${chain.charAt(0).toUpperCase()+chain.slice(1)}</div></div>
+        <div class="meta-cell"><div class="mk">Chain</div><div class="mv" style="color:${chainColor}">${resultChain.charAt(0).toUpperCase()+resultChain.slice(1)}</div></div>
         <div class="meta-cell"><div class="mk">Model</div><div class="mv">${data.model||'TEE_LLM'}</div></div>
         <div class="meta-cell"><div class="mk">Cached</div><div class="mv">${data.cached?'Yes':'Fresh'}</div></div>
         <div class="meta-cell"><div class="mk">Scored At</div><div class="mv">${data.scored_at?new Date(data.scored_at).toLocaleTimeString():'Just now'}</div></div>
@@ -569,6 +578,43 @@ function showResult(data,wallet){
   },70));
 }
 
+function scheduleChainDetection(){
+  clearTimeout(detectTimer);
+  const wallet=document.getElementById('wallet-input').value.trim();
+  if(!wallet) return;
+
+  const currentSequence=++detectSequence;
+  detectTimer=setTimeout(async()=>{
+    try{
+      const detected=await detectChainForWallet(wallet);
+      if(currentSequence!==detectSequence||!detected) return;
+      syncChain(detected);
+    }catch(_){}
+  },220);
+}
+
+async function getErrorMessage(res){
+  try{
+    const payload=await res.json();
+    if(typeof payload?.detail==='string'&&payload.detail) return payload.detail;
+  }catch(_){}
+  return `Request failed (${res.status})`;
+}
+
+async function detectChainForWallet(wallet){
+  if(SOLANA_ADDRESS_RE.test(wallet)) return 'solana';
+  if(!EVM_ADDRESS_RE.test(wallet)) return null;
+
+  try{
+    const res=await fetch(`/detect/${encodeURIComponent(wallet)}`,{signal:AbortSignal.timeout(15000)});
+    if(!res.ok) throw new Error(await getErrorMessage(res));
+    const payload=await res.json();
+    return payload?.chain||'ethereum';
+  }catch(_){
+    return 'ethereum';
+  }
+}
+
 async function handleScore(){
   const wallet=document.getElementById('wallet-input').value.trim();
   if(!wallet){document.getElementById('wallet-input').focus();return;}
@@ -579,14 +625,21 @@ async function handleScore(){
 
   const iv=setLoading();
   try{
-    let data=null;
-    try{
-      const ep=chain==='solana'?`/score/${wallet}`:`/score/${chain}/${wallet}`;
-      const res=await fetch(ep,{signal:AbortSignal.timeout(14000)});
-      if(res.ok) data=await res.json();
-    }catch(_){}
+    const detectedChain=await detectChainForWallet(wallet);
+    if(!detectedChain){
+      throw new Error('Unsupported wallet format. Paste a Solana or 0x EVM wallet address.');
+    }
+
+    syncChain(detectedChain);
+    const ep=detectedChain==='solana'
+      ?`/score/${encodeURIComponent(wallet)}`
+      :`/score/${detectedChain}/${encodeURIComponent(wallet)}`;
+    const res=await fetch(ep,{signal:AbortSignal.timeout(20000)});
+    if(!res.ok){
+      throw new Error(await getErrorMessage(res));
+    }
+    const data=await res.json();
     clearInterval(iv);
-    if(!data) data=demo(wallet);
     showResult(data,wallet);
   }catch(err){
     clearInterval(iv);
@@ -595,27 +648,6 @@ async function handleScore(){
     btn.disabled=false;
     btn.innerHTML=`Score Wallet <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>`;
   }
-}
-
-function demo(wallet){
-  let h=0;
-  for(let i=0;i<wallet.length;i++) h=(h*31+wallet.charCodeAt(i))>>>0;
-  const score=28+(h%68);
-  const exps=[
-    'Wallet shows consistent DeFi engagement across 3 protocols over 18 months. No liquidation events detected. Repayment rate strong; wallet age indicates an organic user.',
-    'Moderate on-chain activity with limited protocol diversity. No suspicious patterns or flagged counterparties detected.',
-    'High-frequency DEX trader with concentrated swap activity. Minimal lending history. Sybil risk low based on wallet age and organic fee patterns.',
-    'Long-standing wallet with governance participation and staking. Behavioral signals indicate a committed ecosystem participant rather than an airdrop farmer.',
-  ];
-  const rh=(n)=>Array.from({length:n},()=>'0123456789abcdef'[(h=(h*16807)>>>0)%16]).join('');
-  return{
-    score,explanation:exps[h%exps.length],model:'TEE_LLM',chain,wallet,
-    scored_at:new Date().toISOString(),cached:false,
-    attestation:{
-      payment_hash:'0x'+rh(40),
-      proof_url:score>48?`https://explorer.opengradient.ai/proof/${rh(16)}`:null
-    }
-  };
 }
 </script>
 </body>

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -67,6 +68,24 @@ class ChainsResponse(BaseModel):
     chains: list[str]
 
 
+class ChainCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    chain: str
+    total_transactions: int
+    unique_protocols: int
+    score: int
+
+
+class ChainDetectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    wallet: str
+    chain: str
+    auto_detected: bool
+    candidates: list[ChainCandidate]
+
+
 class CacheDeleteResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -117,6 +136,37 @@ async def health() -> JSONResponse:
 @app.get("/chains", response_model=ChainsResponse)
 async def list_supported_chains() -> ChainsResponse:
     return ChainsResponse(chains=WalletFetcher.supported_chains())
+
+
+@app.get("/detect/{wallet_address}", response_model=ChainDetectionResponse)
+async def detect_wallet_chain(wallet_address: str) -> ChainDetectionResponse:
+    wallet_address = wallet_address.strip()
+
+    if SOLANA_ADDRESS_RE.fullmatch(wallet_address):
+        return ChainDetectionResponse(
+            wallet=wallet_address,
+            chain="solana",
+            auto_detected=True,
+            candidates=[
+                ChainCandidate(
+                    chain="solana",
+                    total_transactions=0,
+                    unique_protocols=0,
+                    score=0,
+                )
+            ],
+        )
+
+    if not EVM_ADDRESS_RE.fullmatch(wallet_address):
+        raise HTTPException(status_code=400, detail="Unsupported wallet address format.")
+
+    detected_chain, candidates = await detect_best_evm_chain(wallet_address)
+    return ChainDetectionResponse(
+        wallet=wallet_address,
+        chain=detected_chain,
+        auto_detected=True,
+        candidates=candidates,
+    )
 
 
 @app.post("/score", response_model=ScoreResponse)
@@ -234,6 +284,69 @@ async def generate_score_result(wallet_address: str, chain: str) -> dict[str, An
     )
 
 
+async def detect_best_evm_chain(wallet_address: str) -> tuple[str, list[ChainCandidate]]:
+    etherscan_api_key = os.getenv("ETHERSCAN_API_KEY", "").strip()
+    if not etherscan_api_key:
+        return (
+            "ethereum",
+            [
+                ChainCandidate(
+                    chain="ethereum",
+                    total_transactions=0,
+                    unique_protocols=0,
+                    score=0,
+                )
+            ],
+        )
+
+    ordered_chains = ["ethereum", "base", "arbitrum", "optimism", "polygon"]
+    probes = await asyncio.gather(
+        *[probe_evm_chain(wallet_address, chain, etherscan_api_key) for chain in ordered_chains]
+    )
+    sorted_candidates = sorted(
+        probes,
+        key=lambda candidate: (
+            candidate.total_transactions,
+            candidate.unique_protocols,
+            candidate.score,
+            -ordered_chains.index(candidate.chain),
+        ),
+        reverse=True,
+    )
+    best = sorted_candidates[0]
+    if best.total_transactions == 0 and best.unique_protocols == 0 and best.score == 10:
+        return "ethereum", sorted_candidates
+    return best.chain, sorted_candidates
+
+
+async def probe_evm_chain(
+    wallet_address: str,
+    chain: str,
+    etherscan_api_key: str,
+) -> ChainCandidate:
+    try:
+        fetcher = WalletFetcher(
+            wallet_address,
+            chain,
+            etherscan_api_key=etherscan_api_key,
+            alchemy_api_key="",
+            timeout=8.0,
+            max_pages=1,
+        )
+        wallet_data = await fetcher.fetch()
+        score = CreditScorer().score_wallet(wallet_data)["score"]
+    except Exception:
+        wallet_data = {}
+        score = 0
+
+    return ChainCandidate(
+        chain=chain,
+        total_transactions=safe_int(wallet_data.get("total_transactions")),
+        unique_protocols=safe_int(wallet_data.get("unique_protocols")),
+        score=score,
+    )
+
+
 def build_local_score_result(
     *,
     score: int,
@@ -253,18 +366,12 @@ def build_local_score_result(
 
 
 def build_explanation(score_result: dict[str, Any], wallet_data: dict[str, Any]) -> str:
-    def metric(name: str) -> int:
-        try:
-            return int(float(wallet_data.get(name, 0) or 0))
-        except (TypeError, ValueError):
-            return 0
-
     return (
         f"{score_result['risk_tier'].title()} reputation from "
-        f"{metric('total_transactions')} transactions, "
-        f"{metric('unique_protocols')} protocols, "
-        f"{metric('repayment_count')} repayments, and "
-        f"{metric('liquidation_count')} liquidations."
+        f"{safe_int(wallet_data.get('total_transactions'))} transactions, "
+        f"{safe_int(wallet_data.get('unique_protocols'))} protocols, "
+        f"{safe_int(wallet_data.get('repayment_count'))} repayments, and "
+        f"{safe_int(wallet_data.get('liquidation_count'))} liquidations."
     )
 
 
@@ -288,6 +395,13 @@ def cache_expiry_iso() -> str:
         "+00:00",
         "Z",
     )
+
+
+def safe_int(value: Any) -> int:
+    try:
+        return int(float(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 if __name__ == "__main__":
